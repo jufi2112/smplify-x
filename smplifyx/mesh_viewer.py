@@ -63,6 +63,9 @@ class MeshViewer(object):
     def close_viewer(self):
         if self.viewer.is_active:
             self.viewer.close_external()
+            print("Waiting for viewer to exit...")
+            while self.viewer.is_active:
+                pass
 
     def create_mesh(self, vertices, faces, color=(0.3, 0.3, 0.3, 1.0),
                     wireframe=False):

@@ -198,8 +198,13 @@ def main(**args):
     # Add a fake batch dimension for broadcasting
     joint_weights.unsqueeze_(dim=0)
 
-    for idx, data in enumerate(dataset_obj):
+    print(f"Hand usage: {dataset_obj.use_hands}")
+    print(f"Face usage: {dataset_obj.use_face}")
 
+    for idx, data in enumerate(dataset_obj):
+        if not data:
+            print("    Skipping...")
+            continue
         img = data['img']
         fn = data['fn']
         keypoints = data['keypoints']

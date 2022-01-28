@@ -10,7 +10,9 @@ import argparse
 from PIL import Image as pil_img
 import matplotlib.pyplot as plt
 from pyrender import Node, DirectionalLight
-
+from typing import Tuple, Union, List
+from tqdm import tqdm
+import shutil
 try:
     import cPickle as pickle
 except ImportError:
@@ -76,7 +78,7 @@ def get_scene_render(body_mesh: pyrender.Mesh,
                      camera_center: np.ndarray, 
                      camera_translation: np.ndarray,
                      camera_focal_length: float = 5000,
-                    ):
+                    ) -> Tuple[np.ndarray, np.ndarray]:
     """Renders the scene and returns the color and depth output"""
 
     scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0, 0.0],
@@ -105,18 +107,36 @@ def get_scene_render(body_mesh: pyrender.Mesh,
     return color, depth
 
 
-def combine_scene_image(scene_rgba,
+def combine_scene_image(scene_rgba: Union[np.ndarray, List[np.ndarray]],
                         original_image) -> pil_img:
-    """Combines the rendered scene with the original image and returns it as PIL.Image"""
+    """Combines the rendered scene with the original image and returns it as PIL.Image
+    If a list of rendered scenes is given, they are all added to the original image.
 
-    scene_normalized = scene_rgba.astype(np.float32) / 255.0
+    TODO: Strategy when bodies overlap (e.g. consider depth maps to infer which body should be shown)
+    """
+    # rewrite such that only lists are accepted and processed
     original_normalized = (np.asarray(original_image) / 255.0).astype(np.float32)
-    valid_mask = (scene_normalized[:, :, -1] > 0)[:, :, np.newaxis]
+    if isinstance(scene_rgba, np.ndarray):
+        scene_normalized = scene_rgba.astype(np.float32) / 255.0
+        valid_mask = (scene_normalized[:, :, -1] > 0)[:, :, np.newaxis]
 
-    output_image = (scene_normalized[:, :, :-1] * valid_mask +
-                    (1 - valid_mask) * original_normalized)
-    img = pil_img.fromarray((output_image * 255).astype(np.uint8))
-    return img
+        output_image = (scene_normalized[:, :, :-1] * valid_mask +
+                        (1 - valid_mask) * original_normalized)
+        img = pil_img.fromarray((output_image * 255).astype(np.uint8))
+        return img
+    elif isinstance(scene_rgba, list):
+        bodies = []
+        valid_masks = []
+        scenes_normalized = np.asarray(scene_rgba).astype(np.float32) / 255.0
+        for scene in scenes_normalized:
+            valid_mask = (scene[:, :, -1] > 0)[:, :, np.newaxis]
+            bodies.append(scene[:, :, :-1] * valid_mask)
+            valid_masks.append(valid_mask)
+        body_mask = (np.sum(valid_masks, axis=0)[:, :, 0] > 0)[:, :, np.newaxis]
+        # for now: prevent overflow when bodies overlap by clipping. Later: only show the one in front using depth map
+        output_image = np.clip(np.sum(bodies, axis=0), 0, 1) + (1 - body_mask) * original_normalized
+        img = pil_img.fromarray((output_image * 255).astype(np.uint8))
+        return img        
 
 
 def load_image(path) -> pil_img:
@@ -132,45 +152,66 @@ def main(args):
 
     images = [file for file in os.listdir(args.images) if os.path.splitext(file)[1] in ['.png', '.jpg']]
 
+    os.makedirs(args.output, exist_ok=True)
+
     # visualize each image separately
-    for image in images:
+    for image in tqdm(images, desc="Image Processing"):
         image_name = os.path.splitext(image)[0]
 
         if not os.path.exists(os.path.join(mesh_folder, image_name)):
             if args.verbosity > 0:
                 print(f"No mesh generated for image {image}")
+            if args.copy_empty:
+                shutil.copy(os.path.join(args.images, image), os.path.join(args.output, image))
             continue
 
         persons_meshes = os.listdir(os.path.join(mesh_folder, image_name))
         persons_results = os.listdir(os.path.join(result_pickle_folder, image_name))
+        img = load_image(os.path.join(args.images, image))
 
         assert len(persons_meshes) == len(persons_results), f"Not the same amount of persons in meshes and results folder for image {image}"
 
         # at the moment, only a single person is supported
-        person = persons_meshes[0]
+        #person = persons_meshes[0]
+        renders_to_combine = []
+        for person in persons_meshes:
 
-        result = read_pickle_file(os.path.join(result_pickle_folder, image_name, os.path.splitext(person)[0]+'.pkl'))
-        body_mesh = load_mesh(os.path.join(mesh_folder, image_name, person))
-        img = load_image(os.path.join(args.images, image))
+            person_id = os.path.splitext(person)[0]
+            result = read_pickle_file(os.path.join(result_pickle_folder, image_name, person_id+'.pkl'))
+            body_mesh = load_mesh(os.path.join(mesh_folder, image_name, person))
 
-        scene_rgba, _ = get_scene_render(
-            body_mesh,
-            img.size[0],
-            img.size[1],
-            result['camera_center'],
-            result['camera_translation'].squeeze()
-        )
-        overlayed = combine_scene_image(scene_rgba, img)
+            scene_rgba, _ = get_scene_render(
+                body_mesh,
+                img.size[0],
+                img.size[1],
+                result['camera_center'],
+                result['camera_translation'].squeeze()
+            )
+            renders_to_combine.append(scene_rgba)
+            overlayed = combine_scene_image(scene_rgba, img)
 
-        if args.show_results:
-            #overlayed.show()
-            plt.imshow(overlayed)
-            plt.gcf().canvas.manager.set_window_title(image_name)
-            plt.axis('off')
-            plt.show()
+            if args.show_results:
+                #overlayed.show()
+                plt.imshow(overlayed)
+                plt.gcf().canvas.manager.set_window_title(f"{image_name} - {person_id}")
+                plt.axis('off')
+                plt.show()
 
-        if args.no_save:
-            overlayed.save(os.path.join(args.output, image_name + '.png'))
+            if not args.no_save:
+                overlayed.save(os.path.join(args.output, f"{image_name}_{person_id}.png"))
+        
+        if len(renders_to_combine) > 1:
+            overall_overlayed = combine_scene_image(renders_to_combine, img)
+            if args.show_results:
+                    #overlayed.show()
+                    plt.imshow(overall_overlayed)
+                    plt.gcf().canvas.manager.set_window_title(f"{image_name} - all")
+                    plt.axis('off')
+                    plt.show()
+
+            if not args.no_save:
+                overall_overlayed.save(os.path.join(args.output, f"{image_name}_all.png"))
+
 
 
 if __name__ == '__main__':
@@ -179,8 +220,9 @@ if __name__ == '__main__':
     parser.add_argument("-i", "--images", type=str, help="Path to the folder that contains the input images.")
     parser.add_argument("-o", "--output", type=str, help="Location where the resulting images should be saved at.")
     parser.add_argument("--focal_length", type=float, default=5000, help="Focal length of the camera.")
+    parser.add_argument("--copy_empty", action="store_true", help="Copies input images without persons to the output folder.")
     parser.add_argument('--show_results', action="store_true", help="Show the resulting overlayed images.")
-    parser.add_argument('--no_save', action="store_false", help="Do not save the resulting overlayed images.")
+    parser.add_argument('--no_save', action="store_true", help="Do not save the resulting overlayed images.")
     parser.add_argument('-v', '--verbosity', type=int, default=0, help="Verbosity level.")
     args = parser.parse_args()
 

@@ -195,6 +195,7 @@ def fit_single_frame(img,
     else:
         body_mean_pose = body_pose_prior.get_mean().detach().cpu()
 
+
     keypoint_data = torch.tensor(keypoints, dtype=dtype)
     gt_joints = keypoint_data[:, :, :2]
     if use_joints_conf:
@@ -357,7 +358,6 @@ def fit_single_frame(img,
                                                 use_vposer=use_vposer,
                                                 pose_embedding=pose_embedding,
                                                 vposer=vposer)
-
         if interactive:
             if use_cuda and torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -466,6 +466,7 @@ def fit_single_frame(img,
             # orientations, if they exist
             result = {'camera_' + str(key): val.detach().cpu().numpy()
                       for key, val in camera.named_parameters()}
+            result['camera_center'] = camera.center.detach().cpu().numpy().squeeze()
             result.update({key: val.detach().cpu().numpy()
                            for key, val in body_model.named_parameters()})
             if use_vposer:
@@ -505,6 +506,7 @@ def fit_single_frame(img,
             np.radians(180), [1, 0, 0])
         out_mesh.apply_transform(rot)
         out_mesh.export(mesh_fn)
+
 
     if visualize:
         import pyrender
