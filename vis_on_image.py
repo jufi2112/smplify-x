@@ -107,36 +107,59 @@ def get_scene_render(body_mesh: pyrender.Mesh,
     return color, depth
 
 
-def combine_scene_image(scene_rgba: Union[np.ndarray, List[np.ndarray]],
-                        original_image) -> pil_img:
-    """Combines the rendered scene with the original image and returns it as PIL.Image
-    If a list of rendered scenes is given, they are all added to the original image.
+def combine_scene_image(scene_rgba: Union[List[np.ndarray], np.ndarray],
+                        original_image,
+                        scene_depth: Union[List[np.ndarray], np.ndarray] = None) -> pil_img:
+    """Combines the rendered scenes inside the given list with the original image and returns it as PIL.Image
 
-    TODO: Strategy when bodies overlap (e.g. consider depth maps to infer which body should be shown)
+    Params
+    ------
+    scene_rgba (list of np.ndarray or np.ndarray): Scene images in rgba format
+    original_image (PIL.Image): Color image where the meshes should be overlayed
+    scene_depth (list of np.ndarray or np.ndarray or None): Scene depth images, where the order corresponds to the order of scene_rgba
+        None if depth images should not be used to infer mesh order.
+
+    Returns
+    -------
+    PIL.Image: The original image overlayed with the scene image
     """
-    # rewrite such that only lists are accepted and processed
-    original_normalized = (np.asarray(original_image) / 255.0).astype(np.float32)
-    if isinstance(scene_rgba, np.ndarray):
-        scene_normalized = scene_rgba.astype(np.float32) / 255.0
-        valid_mask = (scene_normalized[:, :, -1] > 0)[:, :, np.newaxis]
+    ### Code for a single image
+    #    scene_normalized = scene_rgba.astype(np.float32) / 255.0
+    #    valid_mask = (scene_normalized[:, :, -1] > 0)[:, :, np.newaxis]
+    #    output_image = (scene_normalized[:, :, :-1] * valid_mask +
+    #                    (1 - valid_mask) * original_normalized)
+    #    img = pil_img.fromarray((output_image * 255).astype(np.uint8))
+    #    return img
+    ###
+    if isinstance(scene_rgba, np.ndarray) and scene_rgba.ndim < 4:
+        scene_rgba = np.expand_dims(scene_rgba, axis=0)
+    if scene_depth is not None:
+        if not isinstance(scene_depth, np.ndarray):
+            scene_depth = np.asarray(scene_depth)
+        if scene_depth.ndim < 4:
+            scene_depth = scene_depth[..., np.newaxis]
+        # place pixels without object at infinity
+        scene_depth[scene_depth == 0] = np.inf
 
-        output_image = (scene_normalized[:, :, :-1] * valid_mask +
-                        (1 - valid_mask) * original_normalized)
-        img = pil_img.fromarray((output_image * 255).astype(np.uint8))
-        return img
-    elif isinstance(scene_rgba, list):
-        bodies = []
-        valid_masks = []
-        scenes_normalized = np.asarray(scene_rgba).astype(np.float32) / 255.0
-        for scene in scenes_normalized:
-            valid_mask = (scene[:, :, -1] > 0)[:, :, np.newaxis]
-            bodies.append(scene[:, :, :-1] * valid_mask)
-            valid_masks.append(valid_mask)
-        body_mask = (np.sum(valid_masks, axis=0)[:, :, 0] > 0)[:, :, np.newaxis]
-        # for now: prevent overflow when bodies overlap by clipping. Later: only show the one in front using depth map
-        output_image = np.clip(np.sum(bodies, axis=0), 0, 1) + (1 - body_mask) * original_normalized
-        img = pil_img.fromarray((output_image * 255).astype(np.uint8))
-        return img        
+    original_normalized = (np.asarray(original_image) / 255.0).astype(np.float32)
+    bodies = []
+    valid_masks = []
+    scenes_normalized = np.asarray(scene_rgba).astype(np.float32) / 255.0
+    for idx, scene in enumerate(scenes_normalized):
+        # masks body in the render
+        valid_mask = (scene[:, :, -1] > 0)[:, :, np.newaxis]
+        if scene_depth is not None:
+            # masks whether a pixel of the current mesh should be visible
+            depth_mask = np.all(((scene_depth[idx])[np.newaxis, ...] <= scene_depth), axis=0)
+            # only pixels that correspond to this scene's mesh AND are in front of all other meshes should be used
+            valid_mask = np.logical_and(valid_mask, depth_mask)      
+        bodies.append(scene[:, :, :-1] * valid_mask)
+        valid_masks.append(valid_mask)
+    body_mask = (np.sum(valid_masks, axis=0)[:, :, 0] > 0)[:, :, np.newaxis]
+    # for now: prevent overflow when bodies overlap by clipping. Later: only show the one in front using depth map
+    output_image = np.clip(np.sum(bodies, axis=0), 0, 1) + (1 - body_mask) * original_normalized
+    img = pil_img.fromarray((output_image * 255).astype(np.uint8))
+    return img        
 
 
 def load_image(path) -> pil_img:
@@ -171,16 +194,15 @@ def main(args):
 
         assert len(persons_meshes) == len(persons_results), f"Not the same amount of persons in meshes and results folder for image {image}"
 
-        # at the moment, only a single person is supported
-        #person = persons_meshes[0]
         renders_to_combine = []
-        for person in persons_meshes:
+        depth_maps = []
+        for index, person in tqdm(enumerate(persons_meshes), desc="Person Processing"):
 
             person_id = os.path.splitext(person)[0]
             result = read_pickle_file(os.path.join(result_pickle_folder, image_name, person_id+'.pkl'))
             body_mesh = load_mesh(os.path.join(mesh_folder, image_name, person))
 
-            scene_rgba, _ = get_scene_render(
+            scene_rgba, depth = get_scene_render(
                 body_mesh,
                 img.size[0],
                 img.size[1],
@@ -188,10 +210,18 @@ def main(args):
                 result['camera_translation'].squeeze()
             )
             renders_to_combine.append(scene_rgba)
-            overlayed = combine_scene_image(scene_rgba, img)
+            if not args.no_depth:
+                depth_maps.append(depth)
+                depth = [depth]
+            else:
+                depth = None
+
+            if not args.save_per_person:
+                continue
+
+            overlayed = combine_scene_image([scene_rgba], img, depth)
 
             if args.show_results:
-                #overlayed.show()
                 plt.imshow(overlayed)
                 plt.gcf().canvas.manager.set_window_title(f"{image_name} - {person_id}")
                 plt.axis('off')
@@ -200,10 +230,11 @@ def main(args):
             if not args.no_save:
                 overlayed.save(os.path.join(args.output, f"{image_name}_{person_id}.png"))
         
-        if len(renders_to_combine) > 1:
-            overall_overlayed = combine_scene_image(renders_to_combine, img)
+        if len(renders_to_combine) > 1 or not args.save_per_person:
+            if args.no_depth:
+                depth_maps = None
+            overall_overlayed = combine_scene_image(renders_to_combine, img, depth_maps)
             if args.show_results:
-                    #overlayed.show()
                     plt.imshow(overall_overlayed)
                     plt.gcf().canvas.manager.set_window_title(f"{image_name} - all")
                     plt.axis('off')
@@ -224,6 +255,10 @@ if __name__ == '__main__':
     parser.add_argument('--show_results', action="store_true", help="Show the resulting overlayed images.")
     parser.add_argument('--no_save', action="store_true", help="Do not save the resulting overlayed images.")
     parser.add_argument('-v', '--verbosity', type=int, default=0, help="Verbosity level.")
+    parser.add_argument('--save_per_person', action="store_true", help="For images that contain multiple persons, save the visualization "+
+        "of every single person instead of only saving the combined visualization")
+    parser.add_argument('--no_depth', action="store_true", help="Do not consider depth data during visualization, i.e. all meshes will "+
+        "simply get added.")
     args = parser.parse_args()
 
     main(args)
