@@ -256,7 +256,7 @@ if __name__ == '__main__':
     parser.add_argument('--no_save', action="store_true", help="Do not save the resulting overlayed images.")
     parser.add_argument('-v', '--verbosity', type=int, default=0, help="Verbosity level.")
     parser.add_argument('--save_per_person', action="store_true", help="For images that contain multiple persons, save the visualization "+
-        "of every single person instead of only saving the combined visualization")
+        "of every single person as opposed to only saving the combined visualization")
     parser.add_argument('--no_depth', action="store_true", help="Do not consider depth data during visualization, i.e. all meshes will "+
         "simply get added.")
     args = parser.parse_args()
