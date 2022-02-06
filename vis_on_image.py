@@ -140,6 +140,7 @@ def combine_scene_image(scene_rgba: Union[List[np.ndarray], np.ndarray],
             scene_depth = scene_depth[..., np.newaxis]
         # place pixels without object at infinity
         scene_depth[scene_depth == 0] = np.inf
+        min_depth = scene_depth.min(axis=0)
 
     original_normalized = (np.asarray(original_image) / 255.0).astype(np.float32)
     bodies = []
@@ -150,7 +151,8 @@ def combine_scene_image(scene_rgba: Union[List[np.ndarray], np.ndarray],
         valid_mask = (scene[:, :, -1] > 0)[:, :, np.newaxis]
         if scene_depth is not None:
             # masks whether a pixel of the current mesh should be visible
-            depth_mask = np.all(((scene_depth[idx])[np.newaxis, ...] <= scene_depth), axis=0)
+            # old method: depth_mask = np.all(((scene_depth[idx])[np.newaxis, ...] <= scene_depth), axis=0)
+            depth_mask = scene_depth[idx] == min_depth
             # only pixels that correspond to this scene's mesh AND are in front of all other meshes should be used
             valid_mask = np.logical_and(valid_mask, depth_mask)      
         bodies.append(scene[:, :, :-1] * valid_mask)
